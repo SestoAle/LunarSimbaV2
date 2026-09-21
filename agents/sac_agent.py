@@ -17,6 +17,31 @@ LOG_SIG_MAX = 2
 LOG_SIG_MIN = -5
 
 
+class RunningDiscountedReturn:
+    def __init__(self, discount):
+        self.g_t_minus_1 = 0
+        self.g_max = -np.inf
+        self.discount = discount
+        self.M2 = 0
+        self.g_mean = 0
+        self.count = 0
+        self.variance = 1
+
+    def update_statistics(self, reward, is_terminal):
+        g = self.discount * self.g_t_minus_1 + reward
+        self.count += 1
+        delta = g - self.g_mean
+        self.g_mean += delta / self.count
+        delta_after = g - self.g_mean
+        self.M2 += delta * delta_after
+        self.variance = self.M2 / self.count
+
+        self.g_max = max(self.g_max, g)
+        self.g_t_minus_1 = g
+
+        if is_terminal:
+            self.g_t_minus_1 = 0
+
 class Policy(nn.Module):
     def __init__(
         self,
@@ -53,24 +78,57 @@ class Policy(nn.Module):
 
 
 class Critic(nn.Module):
-    def __init__(self, state_dim, action_dim, embedding_arch, **kwargs):
+    def __init__(self, 
+                 state_dim, 
+                 action_dim, 
+                 embedding_arch,
+                 is_distributional=False,
+                 n_atoms=10,
+                 g_max=10,
+                 g_min=-10 ,
+                 **kwargs):
         super(Critic, self).__init__()
 
         # Layers specification
         self.embedding_q1_l = embedding_arch(state_dim + action_dim)
-        self.q1_l = nn.Linear(self.embedding_q1_l.output_dim, 1)
-
         self.embedding_q2_l = embedding_arch(state_dim + action_dim)
-        self.q2_l = nn.Linear(self.embedding_q1_l.output_dim, 1)
+
+        self.is_distributional = is_distributional
+        self.n_atoms = n_atoms
+        self.g_max = g_max
+        self.g_min = g_min
+
+        if self.is_distributional:
+
+            self.atoms = torch.tensor([g_min + (i - 1) * ((g_max - g_min) / (n_atoms - 1)) for i in range(1, n_atoms + 1)]).view(1, -1)
+            self.q1_l = nn.Linear(self.embedding_q1_l.output_dim, self.n_atoms)
+            self.q2_l = nn.Linear(self.embedding_q2_l.output_dim, self.n_atoms)
+        else:
+            self.q1_l = nn.Linear(self.embedding_q1_l.output_dim, 1)
+            self.q2_l = nn.Linear(self.embedding_q2_l.output_dim, 1)
 
     def forward(self, state, action):
         x = torch.cat([state, action], dim=1)
+        bs = x.shape[0]
         q1 = self.embedding_q1_l(x)
-        q1 = self.q1_l(q1)
-
         q2 = self.embedding_q2_l(x)
-        q2 = self.q2_l(q2)
-        return q1, q2
+
+        if self.is_distributional:
+            q1_logits = self.q1_l(q1)
+            q1_probs = nn.functional.softmax(q1_logits, dim=-1)
+            atoms = torch.repeat_interleave(self.atoms, bs, dim=0)
+            q1 = torch.sum(q1_probs * atoms, dim=-1).view(-1, 1)
+
+            q2_logits = self.q2_l(q2)
+            q2_probs = nn.functional.softmax(q2_logits, dim=-1)
+            atoms = torch.repeat_interleave(self.atoms, bs, dim=0)
+            q2 = torch.sum(q2_probs * atoms, dim=-1).view(-1, 1)
+        else:
+            q1 = self.q1_l(q1)
+            q2 = self.q2_l(q2)
+            q1_logits = q1
+            q2_logits = q2
+        return q1, q2, q1_logits, q2_logits
 
     def Q1(self, state, action):
         x = torch.cat([state, action], dim=1)
@@ -108,6 +166,10 @@ class SACAgent(nn.Module):
         reset_ratio=128,
         replay_ratio=1,
         discount_increasing_phase=0.25,
+        is_distributional_critic=False,
+        n_atoms=10,
+        g_min=-10,
+        g_max=10,
         **kwargs,
     ):
         super(SACAgent, self).__init__()
@@ -134,9 +196,16 @@ class SACAgent(nn.Module):
         self.tau = tau
         self.model_name = name
         self.n_step = 1
+        # For distributional critic
+        self.is_distributional_critic = is_distributional_critic
+        self.n_atoms = n_atoms
+        self.g_min = g_min
+        self.g_max = g_max
+
 
         # SAC hyper-parameters
         self.discount = discount
+        self.running_discounted_statistics = RunningDiscountedReturn(discount=self.discount)
         # Action hyper-parameters
         # min and max values for continuous actions
         self.action_min_value = min_action_value
@@ -199,15 +268,16 @@ class SACAgent(nn.Module):
             self.alpha_optim = torch.optim.Adam([self.log_alpha], lr=self.v_lr)
 
         self.critic = Critic(
-            self.state_dim, self.action_size, self.critic_embedding
+            self.state_dim, self.action_size, self.critic_embedding,
+            is_distributional=self.is_distributional_critic, n_atoms=self.n_atoms, g_min=self.g_min, g_max=self.g_max
         ).to(self.device)
-        self.critic_loss = torch.nn.MSELoss()
         self.critic_optimizer = torch.optim.Adam(
             self.critic.parameters(), lr=self.v_lr, betas=(0.9, 0.999)
         )
 
         self.critic_target = Critic(
-            self.state_dim, self.action_size, self.critic_embedding
+            self.state_dim, self.action_size, self.critic_embedding,
+            is_distributional=self.is_distributional_critic, n_atoms=self.n_atoms, g_min=self.g_min, g_max=self.g_max
         ).to(self.device)
         self.copy_target(self.critic_target, self.critic, self.tau, True)
         self.total_itr = 0
@@ -347,12 +417,15 @@ class SACAgent(nn.Module):
                     )
 
             # Get current Q estimates
-            current_Q1, current_Q2 = self.critic(states_mb, actions_mb)
+            current_Q1, current_Q2, logits_Q1, logits_Q2 = self.critic(states_mb, actions_mb)
 
             # Compute critic loss
-            critic_loss = F.mse_loss(current_Q1, target_Q) + F.mse_loss(
-                current_Q2, target_Q
-            )
+            if self.is_distributional_critic:
+                critic_loss = F.kl_div(nn.functional.log_softmax(logits_Q1, dim=-1), target_Q, reduction="batchmean") + F.kl_div(nn.functional.log_softmax(logits_Q2, dim=-1), target_Q, reduction="batchmean") 
+            else:
+                critic_loss = F.mse_loss(current_Q1, target_Q) + F.mse_loss(
+                    current_Q2, target_Q
+                )
 
             # Optimize the critic
             self.critic_optimizer.zero_grad()
@@ -367,7 +440,7 @@ class SACAgent(nn.Module):
                 self.contraint_itr += 1
 
                 action, _, _, _, logprob, probs, dist = self.forward(states_mb)
-                current_Q1, current_Q2 = self.critic(states_mb, action)
+                current_Q1, current_Q2, _, _ = self.critic(states_mb, action)
                 q = torch.min(current_Q1, current_Q2)
                 p_loss = (self.alpha * logprob) - q
 
@@ -432,12 +505,34 @@ class SACAgent(nn.Module):
         action, _, _, _, logprob, probs, dist = self.forward(states_n)
 
         # Compute the target Q value
-        current_Q1, current_Q2 = self.critic_target(states_n, action)
-        target_Q = torch.min(current_Q1, current_Q2) - self.alpha * logprob
-        target_Q = target_Q.view(-1, 1)
+        current_Q1, current_Q2, logits_Q1, logits_Q2 = self.critic_target(states_n, action)
 
-        target = rews + (1.0 - dones.long()) * discount * target_Q
-        target = target.view(-1, 1)
+        if self.is_distributional_critic:
+            q_mask = current_Q1 < current_Q2
+            target_Q = torch.where(q_mask, nn.functional.softmax(logits_Q1, dim=-1), nn.functional.softmax(logits_Q2, dim=-1))
+
+            target = rews + (1.0 - dones.long()) * discount * (self.critic.atoms - self.alpha * logprob)
+            target = torch.clamp(target, self.g_min, self.g_max)
+            atom_spacing = (self.g_max - self.g_min) / (self.n_atoms - 1)
+            position = (target - self.g_min) / atom_spacing
+            lower_pos = torch.floor(position).long()
+            upper_pos = torch.ceil(position).long()
+            lower_weight = upper_pos - position
+            upper_weight = position - lower_pos
+            lower_weight = torch.where(lower_pos == upper_pos, 1, lower_weight)
+            lower_cont = target_Q * lower_weight
+            upper_cont = target_Q * upper_weight
+            new_target = torch.zeros_like(target_Q)
+            new_target = torch.scatter_add(new_target, dim=1, index=lower_pos, src=lower_cont)
+            new_target = torch.scatter_add(new_target, dim=1, index=upper_pos, src=upper_cont)
+            target = new_target
+        else:
+
+            target_Q = torch.min(current_Q1, current_Q2) - self.alpha * logprob
+            target_Q = target_Q.view(-1, 1)
+
+            target = rews + (1.0 - dones.long()) * discount * target_Q
+            target = target.view(-1, 1)
 
         return target
 

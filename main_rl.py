@@ -18,7 +18,7 @@ device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 # Parse arguments for training
 parser = argparse.ArgumentParser()
 parser.add_argument('-mn', '--model-name', help="The name of the policy", default='test')
-parser.add_argument('-al', '--algorithm_name', help="We can choose between two algorithms, ppo and sac", default='sac', choices=["ppo", "sac"])
+parser.add_argument('-al', '--algorithm_name', help="We can choose between two algorithms, ppo and sac", default='ppo', choices=["ppo", "sac"])
 parser.add_argument('-sf', '--save-frequency', help="How mane episodes after save the model", default=1000)
 parser.add_argument('-lg', '--logging', help="How many episodes after logging statistics", default=100)
 parser.add_argument('-mt', '--max-timesteps', help="Max timestep per episode", default=1000)
@@ -91,14 +91,14 @@ if __name__ == "__main__":
     # Name of the algorithm
     algorithm_name = args.algorithm_name
     # Units of training (episodes or timesteps)
-    frequency_mode = 'timesteps' 
+    frequency_mode = 'episodes' 
     # Frequency of training (in episode or timesteps)
     frequency = 50 if frequency_mode == "episodes" else 1024
     frequency = frequency if not args.evaluate else 1e10 
     # Memory of the agent (in episodes or timesteps)
     # For this project, the main algorithm is gonna be SAC so the memory
     # becomes an hyperparameter
-    memory = 1e6 
+    memory = 50 if frequency_mode == "episodes" else 1e6 
     # Learning rate
     lr = 3e-4
     # Random initial action
@@ -134,7 +134,7 @@ if __name__ == "__main__":
         agent = PPOAgent(state_dim=state_size, policy_embedding=PolicyEmbedding, 
                  critic_embedding=CriticEmbedding, action_type=action_type, action_size=action_size,
                  model_name=model_name, p_lr=lr, v_batch_size=4096, v_num_itr=50, memory=memory, batch_size=4096,
-                 c2=0.01, discount=0.99, v_lr=lr, frequency_mode=frequency_mode, distribution='beta', lmbda=1.0,
+                 c2=0.01, discount=0.99, v_lr=lr, frequency_mode=frequency_mode, distribution='beta', lmbda=0.95,
                  action_min_value=-1, action_max_value=1, p_num_itr=50, device=device, action_masking=action_masking)
     elif algorithm_name == "sac":
         agent = SACAgent(state_dim=state_size, policy_embedding=PolicyEmbedding, critic_embedding=CriticEmbedding,
