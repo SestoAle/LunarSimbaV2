@@ -32,25 +32,19 @@ class CriticEmbedding(nn.Module):
     def __init__(self, state_dim, **kwargs):
         super(CriticEmbedding, self).__init__()
         self.state_dim = state_dim
+        self.hidden_dim = 768
+        self.num_hidden_layers = 7
 
-        self.linear1 = nn.Linear(state_dim, 512)
-        self.linear2 = nn.Linear(512, 512)
-        self.linear3 = nn.Linear(512, 512)
-        self.linear4 = nn.Linear(512, 512)
-        self.linear5 = nn.Linear(512, 512)
+        self.hidden_layers = nn.ModuleList(
+            [nn.Linear(self.hidden_dim, self.hidden_dim) for _ in range(self.num_hidden_layers)]
+        )
 
-
-        self.output_dim = 512
+        self.linear1 = nn.Linear(state_dim, self.hidden_dim)
+        self.output_dim = self.hidden_dim
 
     def forward(self, state):
         emb = self.linear1(state)
         emb = F.tanh(emb)
-        emb = self.linear2(emb)
-        emb = F.relu(emb)
-        emb = self.linear3(emb)
-        emb = F.relu(emb)
-        emb = self.linear4(emb)
-        emb = F.relu(emb)
-        emb = self.linear5(emb)
-        emb = F.relu(emb)
+        for l in self.hidden_layers:
+            emb = F.relu(l(emb))
         return emb

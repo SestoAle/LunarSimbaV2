@@ -100,7 +100,7 @@ class Critic(nn.Module):
 
         if self.is_distributional:
 
-            self.atoms = torch.tensor([g_min + (i - 1) * ((g_max - g_min) / (n_atoms - 1)) for i in range(1, n_atoms + 1)]).view(1, -1)
+            self.register_buffer("atoms", torch.tensor([g_min + (i - 1) * ((g_max - g_min) / (n_atoms - 1)) for i in range(1, n_atoms + 1)]).view(1, -1))
             self.q1_l = nn.Linear(self.embedding_q1_l.output_dim, self.n_atoms)
             self.q2_l = nn.Linear(self.embedding_q2_l.output_dim, self.n_atoms)
         else:
@@ -282,6 +282,18 @@ class SACAgent(nn.Module):
         self.copy_target(self.critic_target, self.critic, self.tau, True)
         self.total_itr = 0
 
+        policy_number_parameters = sum(p.numel() for p in self.policy.parameters() if p.requires_grad)
+        critic_number_parameters = sum(p.numel() for p in self.critic.parameters() if p.requires_grad)
+
+        print(f"we are using a policy with {policy_number_parameters} parameters")
+        print(f"we are using a critic with {critic_number_parameters} parameters")
+
+    def update_simba_rsnorm(self, obs):
+        self.critic.embedding_q1_l.normalizer.update_mean_and_var(obs)
+        self.critic.embedding_q2_l.normalizer.update_mean_and_var(obs)
+        self.critic_target.embedding_q1_l.normalizer.update_mean_and_var(obs)
+        self.critic_target.embedding_q2_l.normalizer.update_mean_and_var(obs)
+
     def forward(self, state, deterministic=False, action_masking=None, train=True):
         action_scale = (self.action_max_value - self.action_min_value) / 2.0
         action_bias = (self.action_max_value + self.action_min_value) / 2.0
@@ -376,12 +388,6 @@ class SACAgent(nn.Module):
                 )
 
                 discount = self.discount**self.n_step
-
-                with torch.no_grad():
-                    target_Q = self.compute_target(
-                        next_states_mb, rewards_mb, dones_mb, discount
-                    )
-
             else:
                 mini_batch_idxs = np.random.randint(
                     0, len(self.buffer["states"]), self.batch_size
@@ -411,10 +417,17 @@ class SACAgent(nn.Module):
                     torch.from_numpy(np.asarray(actions_mb)).to(self.device).float()
                 )
 
-                with torch.no_grad():
-                    target_Q = self.compute_target(
-                        next_states_mb, rewards_mb, dones_mb, discount=self.discount
-                    )
+                discount = self.discount
+
+            # If we have a distributional critic, we will use a running return to normalize the reward
+            if self.is_distributional_critic:
+                rewards_mb = rewards_mb / (max(np.sqrt(self.running_discounted_statistics.variance + 1e-5), self.running_discounted_statistics.g_max / self.g_max))
+
+            with torch.no_grad():
+                target_Q = self.compute_target(
+                    next_states_mb, rewards_mb, dones_mb, discount
+                )
+
 
             # Get current Q estimates
             current_Q1, current_Q2, logits_Q1, logits_Q2 = self.critic(states_mb, actions_mb)
@@ -465,6 +478,12 @@ class SACAgent(nn.Module):
                 # Update the frozen target models
                 self.copy_target(self.critic_target, self.critic, self.tau, False)
                 self.copy_target(self.policy_target, self.policy, self.tau, False)
+
+            if self.is_distributional_critic:
+                self.critic.embedding_q1_l.apply_projection()
+                self.critic.embedding_q2_l.apply_projection()
+                self.critic_target.embedding_q1_l.apply_projection()
+                self.critic_target.embedding_q2_l.apply_projection()
 
             # Update the discount factor
             if self.discount_decay:

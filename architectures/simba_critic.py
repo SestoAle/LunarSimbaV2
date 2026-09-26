@@ -13,9 +13,9 @@ class RSNorm(nn.Module):
 
         super(RSNorm, self).__init__()
         self.input_size     = input_size
-        self.mu             = torch.zeros(1, input_size)
-        self.var            = torch.ones(1, input_size)
-        self.count          = 0
+        self.register_buffer("mu", torch.zeros(1, input_size))
+        self.register_buffer("var", torch.ones(1, input_size))
+        self.register_buffer("count", torch.tensor(0))
         self.eps            = 1e-6
 
 ######################################################################################
@@ -36,9 +36,8 @@ class RSNorm(nn.Module):
     def normalize_obs(self, obs):
 
         bs = obs.shape[0]
-        rpt_mu = torch.repeat_interleave(self.mu, bs, dim=0)
-        rpt_var = torch.repeat_interleave(self.var, bs, dim=0)
-
+        rpt_mu = torch.repeat_interleave(self.mu, bs, dim=0).to(obs.device)
+        rpt_var = torch.repeat_interleave(self.var, bs, dim=0).to(obs.device)
 
         normed_obs = (obs - rpt_mu) / torch.sqrt(torch.pow(rpt_var, 2) + self.eps)
         return normed_obs
@@ -73,7 +72,7 @@ class SimbaInputBlock(nn.Module):
 
         x = self.normalizer.normalize_obs(x)
         x = torch.concat([x, action], dim=-1)
-        rpt_c = torch.repeat_interleave(self.constant, bs, dim=0)
+        rpt_c = torch.repeat_interleave(self.constant, bs, dim=0).to(x.device)
         x = torch.concat([x, rpt_c], dim=-1)
         x = nn.functional.normalize(x, dim=-1)
         x = self.linear(x)
@@ -99,9 +98,8 @@ class SimbaEncodingBlock(nn.Module):
         self.scale_scale    = math.sqrt(2 / (hidden_dim * 4))
         self.scale_vector   = nn.Parameter(torch.ones(1, hidden_dim * 4) * self.scale_scale)
 
-        self.ones           = torch.ones(1, hidden_dim)
-        self.alpha_init     = 1 / (number_of_blocks + 1)
-        self.alpha_scale    = 1 / math.sqrt(hidden_dim)
+        self.register_buffer("alpha_init", torch.tensor(1 / (number_of_blocks + 1)))
+        self.register_buffer("alpha_scale", torch.tensor(1 / math.sqrt(hidden_dim)))
         self.alphas         = nn.Parameter(torch.ones(1, hidden_dim) * self.alpha_scale)
 
 ######################################################################################
@@ -117,7 +115,7 @@ class SimbaEncodingBlock(nn.Module):
 
         # LERP
         actual_alphas = self.alphas * (self.alpha_init / self.alpha_scale)
-        one_minus_alpha_h = (self.ones - actual_alphas) * input_x
+        one_minus_alpha_h = (1 - actual_alphas) * input_x
         alpha_h = actual_alphas * x
         x = nn.functional.normalize(one_minus_alpha_h + alpha_h, dim=-1)
 
@@ -155,11 +153,28 @@ class SimbaCritic(nn.Module):
             for _ in range(self.number_of_block)
             ])
 
-        self.logits_1 = nn.Linear(self.hidden_dim, self.hidden_dim, bias=False)
-        self.logits_2 = nn.Linear(self.hidden_dim, self.output_dim, bias=False)
+        self.logits_1 = nn.Linear(self.hidden_dim, self.output_dim, bias=False)
         self.scaler_init = math.sqrt(2 / self.hidden_dim)
         self.scaler_scale = math.sqrt(2 / self.hidden_dim)
         self.scaler_vector = nn.Parameter(torch.ones(1, self.hidden_dim) * self.scaler_scale)
+
+        self.apply(self.orthogonal_initialize)
+        self.apply_projection()
+
+######################################################################################
+    def orthogonal_initialize(self, module):
+        with torch.no_grad():
+            if isinstance(module, nn.Linear):
+                nn.init.orthogonal_(module.weight)
+
+######################################################################################
+    def project_to_unit_length(self, module):
+        with torch.no_grad():
+            if isinstance(module, nn.Linear):
+                module.weight.copy_(module.weight / (torch.linalg.norm(module.weight, dim=-1, keepdim=True) + 1e-5))
+
+    def apply_projection(self):
+        self.apply(self.project_to_unit_length)
 
 ######################################################################################
     def forward(self, x):
@@ -170,8 +185,6 @@ class SimbaCritic(nn.Module):
         emb = self.logits_1(emb)
         actual_scaler = self.scaler_vector * (self.scaler_init / self.scaler_scale)
         emb = actual_scaler * emb
-        emb = self.logits_2(emb)
-
         return emb
         
 

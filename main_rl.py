@@ -1,8 +1,8 @@
-from agents.ppo_agent import PPOAgent
 from agents.sac_agent import SACAgent
 from runners.parallel_runner import Runner as PRunner
 from runners.runner import Runner as SRunner
 from architectures.mlp_based_policy import PolicyEmbedding, CriticEmbedding
+from architectures.simba_critic import SimbaCritic
 from envs.gym_env import GymEnv
 
 import argparse
@@ -18,20 +18,20 @@ device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 # Parse arguments for training
 parser = argparse.ArgumentParser()
 parser.add_argument('-mn', '--model-name', help="The name of the policy", default='test')
-parser.add_argument('-al', '--algorithm_name', help="We can choose between two algorithms, ppo and sac", default='ppo', choices=["ppo", "sac"])
+parser.add_argument('-al', '--algorithm_name', help="We can choose between two algorithms, this repo has only sac support", default='sac', choices=["sac"])
 parser.add_argument('-sf', '--save-frequency', help="How mane episodes after save the model", default=1000)
 parser.add_argument('-lg', '--logging', help="How many episodes after logging statistics", default=100)
 parser.add_argument('-mt', '--max-timesteps', help="Max timestep per episode", default=1000)
+parser.add_argument('-te', '--total-episodes', help="Total number of training episodes", default=10000, type=int)
 parser.add_argument('-pl', '--parallel', help="How many environments to simulate in parallel. Default is 1", type=int, default=1)
 parser.add_argument('-fs', '--fixed-seed', help="If we want to use a fixed seed", default=None, type=int)
 
-# In case we want to use SMP
-parser.add_argument('-dp', '--with-diffusion-prior', help="Whether to use the diffusion prior as reward model", action=argparse.BooleanOptionalAction, default=False)
-parser.add_argument('-dn', '--diffusion-prior-name', help="The name of the pre-trained diffusion prior that we want to use as reward model.", default=None)
-parser.add_argument('-hz', '--horizon', help="The horizon of the model", type=int, default=10)
-parser.add_argument('-hs', '--hidden-size', help="The hidden size of the diffusion prior", type=int, default=512)
-parser.add_argument('-ds', '--denoising-steps', help="The number of the denoising steps", type=int, default=50)
-parser.add_argument('-ts', '--denoising-timesteps', help="The K set of the denoising steps that we use to compute the ensemble.", default=[22, 15, 8])
+# In case we want to use Simba critic 
+parser.add_argument('-ws', '--with-simba', help="Whether to use Simba critic", action=argparse.BooleanOptionalAction, default=False)
+parser.add_argument('-dc', '--distributional-critic', help="Whether to use a distributional critic (I think it is required if we use Simba)", action=argparse.BooleanOptionalAction, default=False)
+parser.add_argument('-gx', '--g-max', help="The max of the G for the distributional critic", default=5, type=int)
+parser.add_argument('-gm', '--g-min', help="The min of the G for the distributional critic", default=-5, type=int)
+parser.add_argument('-na', '--number-of-atoms', help="The number of bins for the distributional critic",  default=101, type=int)
 
 # For evaluation and eventually collecting data
 parser.add_argument('-ev', '--evaluate', help="Whether to train or evaluate the agent", action=argparse.BooleanOptionalAction, default=False)
@@ -87,11 +87,11 @@ if __name__ == "__main__":
     curriculum = None
 
     # Total episode of training
-    total_episode = 10e6
+    total_episode = args.total_episodes 
     # Name of the algorithm
     algorithm_name = args.algorithm_name
     # Units of training (episodes or timesteps)
-    frequency_mode = 'episodes' 
+    frequency_mode = 'timesteps' 
     # Frequency of training (in episode or timesteps)
     frequency = 50 if frequency_mode == "episodes" else 1024
     frequency = frequency if not args.evaluate else 1e10 
@@ -110,34 +110,23 @@ if __name__ == "__main__":
     evaluate = args.evaluate 
 
     # Open the environment with all the desired flags
-    # If parallel, create more environments
-    envs = [None] * args.parallel
-    threads = []
-    for i in range(args.parallel):
-        task_index = i
-        t = threading.Thread(target=init_env, args=(envs, task_index, max_episode_timestep))
-        t.start()
-        threads.append(t)
+    env = GymEnv(
+        max_episode_timesteps=max_episode_timestep,
+        save_trajectories=args.save_trajectories,
+    )
 
-    for thr in threads:
-        thr.join()
-    
     # Get the state and action specs
     state_size = 8
     action_size = 2
 
-
     # Create agent
-    # The policy embedding and the critic embedding for the PPO agent are defined in the architecture file
+    # The policy embedding and the critic embedding for the agent are defined in the architecture file
     # You can change those architectures, the agent class will manage the action layers and the value layers
-    if algorithm_name == "ppo":
-        agent = PPOAgent(state_dim=state_size, policy_embedding=PolicyEmbedding, 
-                 critic_embedding=CriticEmbedding, action_type=action_type, action_size=action_size,
-                 model_name=model_name, p_lr=lr, v_batch_size=4096, v_num_itr=50, memory=memory, batch_size=4096,
-                 c2=0.01, discount=0.99, v_lr=lr, frequency_mode=frequency_mode, distribution='beta', lmbda=0.95,
-                 action_min_value=-1, action_max_value=1, p_num_itr=50, device=device, action_masking=action_masking)
-    elif algorithm_name == "sac":
-        agent = SACAgent(state_dim=state_size, policy_embedding=PolicyEmbedding, critic_embedding=CriticEmbedding,
+    if algorithm_name == "sac":
+        agent = SACAgent(state_dim=state_size, policy_embedding=PolicyEmbedding, 
+                         critic_embedding=CriticEmbedding if not args.with_simba else SimbaCritic,
+                         is_distributional_critic=args.distributional_critic, g_max=args.g_max, 
+                         g_min=args.g_min, n_atoms=args.number_of_atoms,
                          discount=0.99, p_lr=lr, v_lr=lr, frequency_mode=frequency_mode, memory=memory,
                          policy_freq=1, alpha=0.2, tau=0.005, batch_size=256, num_itr=256, action_size=action_size,
                          max_action_value=1, min_action_value=-1, device=device, name=model_name) 
@@ -145,20 +134,13 @@ if __name__ == "__main__":
         print(f"No algorithm with name {algorithm_name}")
     
     # Create runner
-    # This class manages the evaluation of the policy and the collection of experience in a parallel setting
-    # (not vectorized)
-    if args.parallel < 2:
-        runner = SRunner(should_stop, agent=agent, frequency=frequency, env=envs[0], save_frequency=save_frequency,
+    # This class manages the evaluation of the policy and the collection of experience
+    runner = SRunner(should_stop, agent=agent, frequency=frequency, env=env, save_frequency=save_frequency,
+                        running_return=args.distributional_critic,
                         logging=logging, total_episode=total_episode, curriculum=curriculum, demonstrations_name="dems",
                         frequency_mode=frequency_mode, curriculum_mode='episodes', callback_function=callback, 
                         random_actions=random_actions, evaluation=args.evaluate,
-                        timesteps_set=args.denoising_timesteps)
-    else:
-        runner = PRunner(should_stop, agent=agent, frequency=frequency, envs=envs, save_frequency=save_frequency,
-                        logging=logging, total_episode=total_episode, curriculum=curriculum,
-                        frequency_mode=frequency_mode, curriculum_mode='episodes', random_actions=random_actions,
-                        callback_function=callback, evaluation=args.evaluate, 
-                        timesteps_set=args.denoising_timesteps)
+                        )
 
     runner.run()
 

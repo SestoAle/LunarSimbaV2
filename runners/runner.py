@@ -10,6 +10,7 @@ class Runner:
     def __init__(self, should_stop, agent, frequency, env, save_frequency=3000, logging=100, total_episode=1e10, curriculum=None,
                  frequency_mode='episodes', random_actions=None, curriculum_mode='steps', evaluate=False,
                  callback_function=None, motivation=None, temperature=1,
+                 running_return=False,
                  # IRL
                  reward_model=None, fixed_reward_model=False, dems_name='', reward_frequency=30, demonstrations_name='None',
                  diffusion_prior=None, timesteps_set=None,
@@ -35,6 +36,10 @@ class Runner:
         self.env = env
         self.curriculum_mode = curriculum_mode
         self.device = agent.device
+
+        # For Simba, we need to keep a running mean of the return. The running mean is
+        # embedded into the SAC agent only
+        self.running_return = running_return
         
         # If we want to evaluate it, and what temperature we should use
         self.evaluate = evaluate
@@ -216,23 +221,9 @@ class Runner:
                         action = np.asarray(np.random.uniform(-1, 1, self.agent.action_size))
 
                 visualize = False
-                # Manual input
-                # action = 99
-                # while (action == 99):
-                #     action = int(input(': '))
-                # Save probabilities for entropy
-
-                #print(state)
-                #input('...')
 
                 local_entropies.append(self.env.entropy(dist))
 
-                # Execute in the environment
-                # try:
-                #     state_n, reward, done, info = self.env.step(action)
-                # except Exception as e:
-                #     state_n, reward, done, info = self.env.step(action)
-                
                 state_n = None
                 while state_n is None:
                     state_n, reward, done, info = self.env.step(action)
@@ -258,6 +249,7 @@ class Runner:
                 # If step is equal than max timesteps, terminate the episode
                 if step >= self.env._max_episode_timesteps - 1:
                     done = True
+
                 # # Time horizon
                 # elif self.frequency_mode == 'timesteps' and (self.total_step + 1) % self.frequency == 0:
                 #     if not done:
@@ -268,6 +260,10 @@ class Runner:
                 # Update memory
                 if not self.recurrent:
                     self.agent.add_to_buffer(state, state_n, action, reward, logprob, done, epsilons, taus)
+                    # In case we need a running return (e.g. for Simba), here is the place where we update the stats
+                    if self.running_return:
+                        self.agent.running_discounted_statistics.update_statistics(reward, done)
+                        self.agent.update_simba_rsnorm(torch.from_numpy(state).to(self.device).view(1, -1))
                 else:
                     try:
                         self.agent.add_to_buffer(state, state_n, action, reward, logprob, done,
@@ -290,7 +286,11 @@ class Runner:
                         if self.total_step > self.random_actions:
                             if self.diffusion_prior is not None:
                                 self.agent.buffer = self.diffusion_prior.compute_reward_given_buffer(self.agent.buffer, self.timesteps_set)
+
+                            start_time = time.time()
                             self.agent.update()
+                            end_time = time.time()
+                            print(f"Update time: {end_time - start_time}")
                     else:
 
                         if self.motivation is not None:
