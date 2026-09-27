@@ -4,8 +4,6 @@ An experiment comparing MLP and **SimbaV2**-style critics with Soft Actor-Critic
 
 For applications like game AI, the policy needs to run on limited hardware, such as console CPUs or older PCs. The policy network therefore needs to be small and efficient. Since the critic is only needed during training, we can give it more capacity without increasing the cost of running the policy in-game. This experiment explores that motivation by changing the critic while keeping the actor architecture fixed. SimbaV2 is an architecture that promises to be good for high capacity networks, high UTD ratio (*so in theory it should be more sample efficient*) and/or high throughput in the data.
 
-[Static preview](assets/critic_heatmaps.png) · [Recording details](assets/critic_heatmaps.json).
-
 <p align="center">
   <img src="assets/results.png" alt="LunarLander training rewards comparing MLP and Simba critics; the Simba curve rises higher and has a narrower shaded band." width="1000">
 </p>
