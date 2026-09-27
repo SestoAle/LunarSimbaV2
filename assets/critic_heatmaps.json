@@ -1,0 +1,48 @@
+{
+  "description": "Checkpoint critic predictions at identical states along one deterministic Simba-actor rollout.",
+  "environment": "LunarLanderContinuous-v3",
+  "seed": 42,
+  "checkpoints": {
+    "saved/lunar_mlp-1_critic": "308538795990ae2d364efec3c65dee31c015989e665e87f7654f093a4a76d2a1",
+    "saved/lunar_simba-1_critic": "adfd9105122e296b37dae3a1d9c8ec0743a5f3f3e61c7e3dadbb7786a8faad0e",
+    "saved/lunar_simba-1_policy": "d8f3f20795096ee1874ddc82f2ae6b113623a40f6cc44f3727193f10c12ee326"
+  },
+  "actor": "tanh(mean), lunar_simba actor specified by --simba; no random warm-up",
+  "critic_value": "min(Q1, Q2); Simba Q values are expectations over the saved atom support",
+  "normalization": "(Q - grid_min) / (grid_max - grid_min), independently per critic and sampled state",
+  "axes": {
+    "x": "side-engine command, action[1]",
+    "y": "main-engine command, action[0]"
+  },
+  "markers": {
+    "white circle": "shared actor action",
+    "pink plus": "critic maximum on sampled action grid"
+  },
+  "grid": [
+    33,
+    33
+  ],
+  "sample_every_steps": 5,
+  "playback_speed": 0.25,
+  "sampled_states": 36,
+  "static_frame_step": 90,
+  "episode": {
+    "steps": 179,
+    "episode_return": 263.4404665059736,
+    "terminated": true,
+    "truncated": false
+  },
+  "limitations": [
+    "One fixed seed and one checkpoint pair; not aggregate evaluation.",
+    "Each critic estimates returns under its own learned policy; raw scales differ.",
+    "Colors show relative predicted preferences, not probabilities or measured action quality.",
+    "The GIF pauses on the last sampled state before looping; the terminal scene is not shown separately."
+  ],
+  "versions": {
+    "torch": "2.11.0+cu130",
+    "gymnasium": "1.3.0",
+    "numpy": "2.4.4"
+  },
+  "regenerate": ".venv/bin/python tmp_/make_critic_heatmap.py",
+  "helper": "tmp_/make_critic_heatmap.py is intentionally gitignored; checkpoints are local artifacts."
+}

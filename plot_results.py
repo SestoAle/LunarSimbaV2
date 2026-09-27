@@ -85,7 +85,7 @@ if __name__ == "__main__":
         name_run = s['name_run']
         name_run = re.sub("x-\d", "x", name_run)
         name_run = re.sub("-\d-", "-", name_run)
-        name_run = re.sub("-\d$", "", name_run)
+        name_run = re.sub(r"-\d+(?=\.json$)", "", name_run)
         if name_run in stats_dict:
             stats_dict[name_run].append(s)
         else:

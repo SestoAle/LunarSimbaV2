@@ -93,16 +93,17 @@ if __name__ == "__main__":
     # Units of training (episodes or timesteps)
     frequency_mode = 'timesteps' 
     # Frequency of training (in episode or timesteps)
-    frequency = 50 if frequency_mode == "episodes" else 1024
+    frequency = 50 if frequency_mode == "episodes" else 1
     frequency = frequency if not args.evaluate else 1e10 
     # Memory of the agent (in episodes or timesteps)
     # For this project, the main algorithm is gonna be SAC so the memory
     # becomes an hyperparameter
     memory = 50 if frequency_mode == "episodes" else 1e6 
     # Learning rate
-    lr = 3e-4
+    lr = 1e-4
+    final_lr = 5e-5
     # Random initial action
-    random_actions = None
+    random_actions = 5000
     # Action type of the policy
     action_type = "continuous"
     action_masking = False
@@ -113,6 +114,7 @@ if __name__ == "__main__":
     env = GymEnv(
         max_episode_timesteps=max_episode_timestep,
         save_trajectories=args.save_trajectories,
+        visualize_inference=args.evaluate
     )
 
     # Get the state and action specs
@@ -127,8 +129,8 @@ if __name__ == "__main__":
                          critic_embedding=CriticEmbedding if not args.with_simba else SimbaCritic,
                          is_distributional_critic=args.distributional_critic, g_max=args.g_max, 
                          g_min=args.g_min, n_atoms=args.number_of_atoms,
-                         discount=0.99, p_lr=lr, v_lr=lr, frequency_mode=frequency_mode, memory=memory,
-                         policy_freq=1, alpha=0.2, tau=0.005, batch_size=256, num_itr=256, action_size=action_size,
+                         discount=0.99, p_lr=lr, v_lr=lr, final_p_lr=final_lr, final_v_lr=final_lr, frequency_mode=frequency_mode, memory=memory,
+                         policy_freq=1, alpha=0.01, tau=0.005, batch_size=256, num_itr=2, action_size=action_size,
                          max_action_value=1, min_action_value=-1, device=device, name=model_name) 
     else:
         print(f"No algorithm with name {algorithm_name}")

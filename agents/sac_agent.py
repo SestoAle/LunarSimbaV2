@@ -148,11 +148,14 @@ class SACAgent(nn.Module):
         critic_embedding,
         discount=0.99,
         p_lr=0.001,
+        final_p_lr=None,
         v_lr=0.001,
+        final_v_lr=None,
+        scheduler_iter=2e6,
         frequency_mode="episodes",
         memory=50,
         policy_freq=1,
-        alpha=0.2,
+        alpha=0.01,
         tau=0.005,
         batch_size=32,
         num_itr=20,
@@ -176,6 +179,9 @@ class SACAgent(nn.Module):
         # Model parameters
         self.p_lr = p_lr
         self.v_lr = v_lr
+        self.final_p_lr = final_p_lr
+        self.final_v_lr = final_v_lr
+        self.scheduler_iter = scheduler_iter
         self.batch_size = batch_size
         self.num_itr = num_itr
         self.name = name
@@ -249,6 +255,9 @@ class SACAgent(nn.Module):
             self.policy_optimizer = torch.optim.Adam(
                 self.policy.parameters(), lr=self.p_lr, betas=(0.9, 0.999)
             )
+            self.policy_scheduler = None
+            if self.final_p_lr is not None:
+                self.policy_scheduler = torch.optim.lr_scheduler.LinearLR(self.policy_optimizer, start_factor=1.0, end_factor=self.final_p_lr/self.p_lr, total_iters=self.scheduler_iter)
             # Define the targets and init them
             self.policy_target = Policy(
                 self.state_dim,
@@ -261,11 +270,14 @@ class SACAgent(nn.Module):
             self.copy_target(self.policy_target, self.policy, self.tau, True)
 
         if self.alpha_tuning:
-            self.target_entropy = -torch.prod(
+            self.target_entropy = -0.5 * torch.prod(
                 torch.Tensor((self.action_size,)).to(self.device)
             ).item()
-            self.log_alpha = torch.zeros(1, requires_grad=True, device=self.device)
+            self.log_alpha = torch.tensor([math.log(self.alpha)], requires_grad=True, device=self.device)
             self.alpha_optim = torch.optim.Adam([self.log_alpha], lr=self.v_lr)
+            self.alpha_scheduler = None
+            if self.final_v_lr is not None:
+                self.alpha_scheduler = torch.optim.lr_scheduler.LinearLR(self.alpha_optim, start_factor=1.0, end_factor=self.final_v_lr/self.v_lr, total_iters=self.scheduler_iter)
 
         self.critic = Critic(
             self.state_dim, self.action_size, self.critic_embedding,
@@ -274,6 +286,9 @@ class SACAgent(nn.Module):
         self.critic_optimizer = torch.optim.Adam(
             self.critic.parameters(), lr=self.v_lr, betas=(0.9, 0.999)
         )
+        self.critic_scheduler = None
+        if self.final_v_lr is not None:
+            self.critic_scheduler = torch.optim.lr_scheduler.LinearLR(self.critic_optimizer, start_factor=1.0, end_factor=self.final_v_lr/self.v_lr, total_iters=self.scheduler_iter)
 
         self.critic_target = Critic(
             self.state_dim, self.action_size, self.critic_embedding,
@@ -421,7 +436,7 @@ class SACAgent(nn.Module):
 
             # If we have a distributional critic, we will use a running return to normalize the reward
             if self.is_distributional_critic:
-                rewards_mb = rewards_mb / (max(np.sqrt(self.running_discounted_statistics.variance + 1e-5), self.running_discounted_statistics.g_max / self.g_max))
+                rewards_mb = rewards_mb / (max(np.sqrt(self.running_discounted_statistics.variance + 1e-8), self.running_discounted_statistics.g_max / self.g_max))
 
             with torch.no_grad():
                 target_Q = self.compute_target(
@@ -444,6 +459,8 @@ class SACAgent(nn.Module):
             self.critic_optimizer.zero_grad()
             critic_loss.backward()
             self.critic_optimizer.step()
+            if self.critic_scheduler is not None:
+                self.critic_scheduler.step()
 
             c_losses.append(critic_loss.detach().cpu())
 
@@ -461,6 +478,8 @@ class SACAgent(nn.Module):
                 self.policy_optimizer.zero_grad()
                 p_loss.backward()
                 self.policy_optimizer.step()
+                if self.policy_scheduler is not None:
+                    self.policy_scheduler.step()
 
                 p_losses.append(p_loss.detach().cpu())
 
@@ -472,6 +491,8 @@ class SACAgent(nn.Module):
                     self.alpha_optim.zero_grad()
                     alpha_loss.backward()
                     self.alpha_optim.step()
+                    if self.alpha_scheduler is not None:
+                        self.alpha_scheduler.step()
 
                     self.alpha = self.log_alpha.exp()
 

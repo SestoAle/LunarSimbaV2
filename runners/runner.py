@@ -287,10 +287,7 @@ class Runner:
                             if self.diffusion_prior is not None:
                                 self.agent.buffer = self.diffusion_prior.compute_reward_given_buffer(self.agent.buffer, self.timesteps_set)
 
-                            start_time = time.time()
                             self.agent.update()
-                            end_time = time.time()
-                            print(f"Update time: {end_time - start_time}")
                     else:
 
                         if self.motivation is not None:
